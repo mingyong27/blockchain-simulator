@@ -1,11 +1,12 @@
 # simulator/node.py
 
 from .block import Block, Transaction
+from .logger import log_event 
 
 class Node:
     """A participant that holds state but delegates consensus rules."""
 
-    def __init__(self, node_id, network, balance, consensus_algo,k_finality=4):
+    def __init__(self, node_id, network, balance, consensus_algo,k_finality=4, logger=None):
         self.id = node_id
         self.network = network
         self.balance = balance
@@ -19,6 +20,7 @@ class Node:
         self.finalized_txs = set()   
 
         self.create_genesis_block()
+        self.logger=logger
 
     def create_genesis_block(self):
         genesis_block = Block(height=0, transactions=[], previous_hash="0", creator="System")
@@ -50,35 +52,49 @@ class Node:
         if tx not in self.mempool:
             self.mempool.append(tx)
 
-    
-    def receive_chain(self, peer_chain):
-
+    def receive_chain(self, peer_chain, t): 
+        
+        # 1. Let the consensus algorithm decide which chain is the "best".
         winning_chain = self.consensus.validate_and_resolve_chain(self.chain, peer_chain)
+
+        # 2. Check if a reorg is necessary.
         if winning_chain is peer_chain:
-            print(f"[{self.id}] Received a better chain (H:{len(peer_chain)-1}). Current is (H:{len(self.chain)-1}). Reorging...")
+            old_height = self.get_chain_head().height
+            
+            # This is a great place to log the start of the reorg.
+            log_event(self.logger, {
+                "time": t,
+                "event": "REORG_START",
+                "node": self.id,
+                "reason": "Peer chain is longer and valid",
+                "current_height": old_height,
+                "peer_height": len(peer_chain) - 1,
+            })
+            
+            # (The reorg logic itself is the same as before)
             fork_point_idx = 0
             for i in range(min(len(self.chain), len(peer_chain))):
                 if self.chain[i].hash != peer_chain[i].hash:
                     break
                 fork_point_idx = i
-
+            
             orphaned_transactions = []
             for orphaned_block in self.chain[fork_point_idx + 1:]:
                 orphaned_transactions.extend(orphaned_block.transactions)
 
             self.chain = peer_chain
             
-            new_chain_transactions = {
-                tx for block in self.chain[fork_point_idx + 1:] 
-                for tx in block.transactions
-            }
+            new_chain_transactions = {tx for block in self.chain[fork_point_idx + 1:] for tx in block.transactions}
             
             for tx in orphaned_transactions:
                 if tx not in new_chain_transactions and tx not in self.mempool:
                     self.mempool.append(tx)
             
-            print(f"[{self.id}] Reorg complete. New chain height: {self.get_chain_head().height}.")
-        self.check_and_update_finality()
+            print(f"[{self.id}] Reorg complete. New height: {self.get_chain_head().height}.")
+        
+        # 3. Check and update finality.
+        # We must also pass the time 't' to this function.
+        self.check_and_update_finality(t)
 
 
     def check_and_update_finality(self):

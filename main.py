@@ -5,6 +5,13 @@ from simulator.node import Node
 from simulator.network import Network
 from simulator.block import Transaction 
 from simulator.consensus import PoW, HybridStakePoW
+from simulator.logger import setup_logger, log_event
+
+import logging
+import json
+import os
+
+LOG_FILE = "simulation_log.jsonl"
 SEED = 42
 random.seed(SEED)
 
@@ -62,16 +69,13 @@ def run_pow_simulation():
         for recipient, message in delivered:
             if message['type'] == 'new_tx':
                 recipient.receive_transaction(message['data'])
-            elif message['type'] == 'gossip_chain':  # <--- KEY CHANGE
-                # This handles incoming blocks and fork resolution
+            elif message['type'] == 'gossip_chain':  
                 recipient.receive_chain(message['data'])
 
         # 3. Trigger node actions (mining)
-        # We pick one random node to "work" on this tick to simulate competition.
         miner_node = random.choice(nodes)
-        miner_node.tick()  # <--- KEY CHANGE: THIS TRIGGERS MINING
+        miner_node.tick()  
 
-    # --- Simulation Finished & Final State Check ---
     print(f"\n--- Simulation Finished at {SIMULATION_DURATION_MS/1000.0}s ---")
     final_chain_heads = {}
     for node in nodes:
@@ -100,15 +104,13 @@ def run_hybrid_simulation():
     # 2. Set up Network and Nodes
     network = Network(latency_min=LATENCY_MIN_MS, latency_max=LATENCY_MAX_MS)
     nodes = []
-    # Create nodes with slightly different balances to see stake effect
     for i in range(NUM_NODES):
-        # Give Node 0 more stake to see if it's chosen more often
         balance = 200 if i == 0 else 100
         node = Node(
             node_id=f"N{i}",
             network=network,
             balance=balance,
-            consensus_algo=hybrid_consensus # Pass the hybrid algorithm
+            consensus_algo=hybrid_consensus 
         )
         nodes.append(node)
         network.add_node(node)
@@ -130,7 +132,7 @@ def run_hybrid_simulation():
             time_of_last_block = t # Reset the timer
 
         # --- 2. Create random transactions ---
-        if t % 300 == 0 and t > 0: # Slower rate than PoW
+        if t % 300 == 0 and t > 0: 
              sender = random.choice(nodes)
              recipient = random.choice([n for n in nodes if n is not sender])
              tx = Transaction(sender.id, recipient.id, random.randint(1, 5))
@@ -153,16 +155,11 @@ def run_hybrid_simulation():
                     print(f"[Time: {t:04d}ms] Network advanced to height {current_height}.")
 
 
-        # --- 4. Leader Action (Mining) ---
-        # All nodes must agree on the same head to select the same leader
-        # For simplicity, we use the view of N0 as the "canonical" chain view
         canonical_head = network.nodes["N0"].get_chain_head()
         if canonical_head.height >= current_height:
              current_height = canonical_head.height
 
         leader = hybrid_consensus.get_leader(canonical_head.hash, nodes, leader_attempt)
-
-        # Tell ONLY the leader node to perform its duty
         if leader.mempool:
             new_block = leader.consensus.mine_light_block(leader, leader.mempool[:2])
             if new_block:
@@ -174,12 +171,31 @@ def run_hybrid_simulation():
             network.partition([['N0', 'N1'], ['N2', 'N3', 'N4']])
         if t == 15000:
             network.heal()
+    
+def setup_logger():
+    """Sets up a logger to output structured JSON data to a file."""
+    # Ensure the log file is empty before a new run
+    if os.path.exists(LOG_FILE):
+        os.remove(LOG_FILE)
+
+    handler = logging.FileHandler(LOG_FILE)
+    logger = logging.getLogger('simulator')
+    logger.setLevel(logging.INFO)
+    # Remove any existing handlers to avoid duplicate logs
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.addHandler(handler)
+    return logger
+
+def log_event(logger, event_data):
+    """Logs a dictionary as a JSON string line."""
+    logger.info(json.dumps(event_data))
 
 
 
 # This makes the script runnable
 if __name__ == "__main__":
-    SIMULATION_MODE = "HYBRID"  
+    SIMULATION_MODE = "POW"  
 
     if SIMULATION_MODE == "POW":
         run_pow_simulation()

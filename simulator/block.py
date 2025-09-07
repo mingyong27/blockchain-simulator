@@ -34,11 +34,6 @@ class Block:
         self.hash = self.calculate_hash()
 
     def calculate_hash(self):
-        """
-        Calculates the SHA-256 hash of the block.
-        The block's data is first serialized to a JSON string.
-        sort_keys=True is crucial for ensuring the hash is deterministic.
-        """
         # We need to convert our list of transaction objects to a list of dictionaries
         transactions_as_dicts = [tx.to_dict() for tx in self.transactions]
         
