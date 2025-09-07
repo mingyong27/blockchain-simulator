@@ -70,7 +70,7 @@ def run_pow_simulation():
             if message['type'] == 'new_tx':
                 recipient.receive_transaction(message['data'])
             elif message['type'] == 'gossip_chain':  
-                recipient.receive_chain(message['data'])
+                recipient.receive_chain(message['data'], t)
 
         # 3. Trigger node actions (mining)
         miner_node = random.choice(nodes)
@@ -146,7 +146,7 @@ def run_hybrid_simulation():
                 recipient.receive_transaction(message['data'])
             elif message['type'] == 'gossip_chain':
                 previous_height = recipient.get_chain_head().height
-                recipient.receive_chain(message['data'])
+                recipient.receive_chain(message['data'],t)
                 # If a new block was successfully accepted, reset the leader logic
                 if recipient.get_chain_head().height > previous_height:
                     current_height = recipient.get_chain_head().height

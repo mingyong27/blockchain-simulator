@@ -97,7 +97,7 @@ class Node:
         self.check_and_update_finality(t)
 
 
-    def check_and_update_finality(self):
+    def check_and_update_finality(self, t):
         """Checks if any new blocks can be marked as final based on the k-rule."""
         chain_tip_height = self.get_chain_head().height
         new_final_height = chain_tip_height - self.k_finality
@@ -118,6 +118,14 @@ class Node:
                     assert tx_id not in self.finalized_txs, \
                         f"[{self.id}] INVARIANT FAIL: Double-spend detected for tx {tx} in final block {h}!"
                     self.finalized_txs.add(tx_id)
+
+            log_event(self.logger, {
+            "time": t,
+            "event": "FINALITY_UPDATE",
+            "node": self.id,
+            "previous_final_height": self.finalized_height,
+            "new_final_height": new_final_height,
+        })
             
             print(f"[{self.id}] ⛓️ Finalized chain up to height {new_final_height}")
             self.finalized_height = new_final_height
