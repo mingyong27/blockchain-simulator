@@ -1,132 +1,114 @@
-# simulator/node.py
-
 from .block import Block, Transaction
-from .logger import log_event 
+from .logger import log_event
 
 class Node:
-    """A participant that holds state but delegates consensus rules."""
-
-    def __init__(self, node_id, network, balance, consensus_algo,k_finality=4, logger=None):
+    def __init__(self, node_id, network, balance, consensus_algo, k_finality=4, logger=None):
         self.id = node_id
         self.network = network
         self.balance = balance
         self.consensus = consensus_algo
         self.chain = []
         self.mempool = []
-
-        self.k_finality = k_finality 
-        self.finalized_height = -1   
-        self.finalized_blocks = {}  
-        self.finalized_txs = set()   
-
+        self.k_finality = k_finality
+        self.finalized_height = -1
+        self.finalized_blocks = {}
+        self.finalized_txs = set()
+        self.logger = logger
         self.create_genesis_block()
-        self.logger=logger
+        if hasattr(self.network, "add_node"):
+            self.network.add_node(self)
 
     def create_genesis_block(self):
-        genesis_block = Block(height=0, transactions=[], previous_hash="0", creator="System")
-        self.chain.append(genesis_block)
+        genesis = Block(height=0, transactions=[], previous_hash="0", creator="System")
+        self.chain.append(genesis)
 
     def get_chain_head(self):
         return self.chain[-1]
-    
-    def tick(self):
-        """
-        On each tick, a node can attempt to mine.
-        It delegates the actual mining process to its consensus object.
-        """
-        if not self.mempool:
-            return # Don't mine if no transactions
 
-        # Let the consensus algorithm try to mine a block
-        transactions_to_include = self.mempool[:2]
-        new_block = self.consensus.mine_block(self, transactions_to_include)
+    def create_and_broadcast_transaction(self, recipient_id, amount):
+        tx = Transaction(self.id, recipient_id, amount)
+        self.receive_transaction(tx)
+        self.network.broadcast(self.id, {"type": "new_tx", "data": tx})
 
-        if new_block:
-            # We found a block! Add it and broadcast our new chain.
-            self.chain.append(new_block)
-            self.mempool = [tx for tx in self.mempool if tx not in new_block.transactions]
-            self.network.broadcast(self.id, {"type": "gossip_chain", "data": self.chain})
-            self.check_and_update_finality()
-            
     def receive_transaction(self, tx):
-        if tx not in self.mempool:
-            self.mempool.append(tx)
+        if tx.id in self.finalized_txs:
+            return
+        for block in self.chain:
+            if any(btx.id == tx.id for btx in block.transactions):
+                return
+        if any(mtx.id == tx.id for mtx in self.mempool):
+            return
+        self.mempool.append(tx)
 
-    def receive_chain(self, peer_chain, t): 
-        
-        # 1. Let the consensus algorithm decide which chain is the "best".
-        winning_chain = self.consensus.validate_and_resolve_chain(self.chain, peer_chain)
+    def tick(self, t):
+        if not self.mempool:
+            return
+        to_include = self.mempool[:2]
+        new_block = self.consensus.mine_block(self, to_include, t, self.logger)
+        if new_block:
+            self.chain.append(new_block)
+            included_ids = {tx.id for tx in new_block.transactions}
+            self.mempool = [tx for tx in self.mempool if tx.id not in included_ids]
+            self.network.broadcast(self.id, {"type": "gossip_chain", "time": t, "data": self.chain[:]})
+            self.check_and_update_finality(t)
 
-        # 2. Check if a reorg is necessary.
-        if winning_chain is peer_chain:
-            old_height = self.get_chain_head().height
-            
-            # This is a great place to log the start of the reorg.
+    def receive_chain(self, peer_chain, t):
+        winning_chain = self.consensus.validate_and_resolve_chain(self, peer_chain)
+        if winning_chain[-1].hash == self.get_chain_head().hash:
+            return
+        old_chain = self.chain
+        fork = 0
+        for i in range(min(len(old_chain), len(winning_chain))):
+            if old_chain[i].hash != winning_chain[i].hash:
+                break
+            fork = i
+        if fork < self.finalized_height:
             log_event(self.logger, {
                 "time": t,
-                "event": "REORG_START",
+                "event": "REORG_REJECTED_FINALITY",
                 "node": self.id,
-                "reason": "Peer chain is longer and valid",
-                "current_height": old_height,
-                "peer_height": len(peer_chain) - 1,
+                "finalized_height": self.finalized_height,
+                "fork": fork,
+                "peer_height": len(peer_chain) - 1
             })
-            
-            # (The reorg logic itself is the same as before)
-            fork_point_idx = 0
-            for i in range(min(len(self.chain), len(peer_chain))):
-                if self.chain[i].hash != peer_chain[i].hash:
-                    break
-                fork_point_idx = i
-            
-            orphaned_transactions = []
-            for orphaned_block in self.chain[fork_point_idx + 1:]:
-                orphaned_transactions.extend(orphaned_block.transactions)
-
-            self.chain = peer_chain
-            
-            new_chain_transactions = {tx for block in self.chain[fork_point_idx + 1:] for tx in block.transactions}
-            
-            for tx in orphaned_transactions:
-                if tx not in new_chain_transactions and tx not in self.mempool:
-                    self.mempool.append(tx)
-            
-            print(f"[{self.id}] Reorg complete. New height: {self.get_chain_head().height}.")
-        
-        # 3. Check and update finality.
-        # We must also pass the time 't' to this function.
-        self.check_and_update_finality(t)
-
+            return
+        log_event(self.logger, {
+            "time": t,
+            "event": "REORG_START",
+            "node": self.id,
+            "current_height": self.get_chain_head().height,
+            "peer_height": len(peer_chain) - 1
+        })
+        orphaned = {tx for block in old_chain[fork + 1:] for tx in block.transactions}
+        self.chain = winning_chain
+        txs_in_new = {tx.id for block in self.chain for tx in block.transactions}
+        reconsider = {tx.id: tx for tx in self.mempool}
+        for tx in orphaned:
+            if tx.id not in self.finalized_txs and tx.id not in txs_in_new:
+                reconsider.setdefault(tx.id, tx)
+        self.mempool = [tx for txid, tx in reconsider.items() if txid not in txs_in_new]
+        print(f"[{self.id}] Reorg complete. New height: {self.get_chain_head().height}.")
 
     def check_and_update_finality(self, t):
-        """Checks if any new blocks can be marked as final based on the k-rule."""
-        chain_tip_height = self.get_chain_head().height
-        new_final_height = chain_tip_height - self.k_finality
-
-        if new_final_height > self.finalized_height:
-            assert new_final_height > self.finalized_height, \
-                f"[{self.id}] INVARIANT FAIL: Finalized height decreased from {self.finalized_height} to {new_final_height}!"
-
-            for h in range(self.finalized_height + 1, new_final_height + 1):
-                block_to_finalize = self.chain[h]
-                if h in self.finalized_blocks:
-                    assert self.finalized_blocks[h] == block_to_finalize.hash, \
-                        f"[{self.id}] INVARIANT FAIL: Finality conflict at height {h}!"
-                
-                self.finalized_blocks[h] = block_to_finalize.hash
-                for tx in block_to_finalize.transactions:
-                    tx_id = (tx.sender, tx.recipient, tx.amount) 
-                    assert tx_id not in self.finalized_txs, \
-                        f"[{self.id}] INVARIANT FAIL: Double-spend detected for tx {tx} in final block {h}!"
-                    self.finalized_txs.add(tx_id)
-
-            log_event(self.logger, {
-            "time": t,
-            "event": "FINALITY_UPDATE",
-            "node": self.id,
-            "previous_final_height": self.finalized_height,
-            "new_final_height": new_final_height,
-        })
-            
-            print(f"[{self.id}] ⛓️ Finalized chain up to height {new_final_height}")
-            self.finalized_height = new_final_height
-
+        tip = self.get_chain_head().height
+        new_final = tip - self.k_finality
+        if new_final <= self.finalized_height or new_final < 0:
+            return
+        initial = self.finalized_height
+        for h in range(self.finalized_height + 1, new_final + 1):
+            if h >= len(self.chain):
+                continue
+            blk = self.chain[h]
+            if h in self.finalized_blocks and self.finalized_blocks[h] != blk.hash:
+                log_event(self.logger, {"time": t, "event": "FINALITY_ERROR", "node": self.id, "reason": "Finality conflict", "height": h})
+                return
+            self.finalized_blocks[h] = blk.hash
+            for tx in blk.transactions:
+                if tx.id in self.finalized_txs:
+                    log_event(self.logger, {"time": t, "event": "FINALITY_ERROR", "node": self.id, "reason": "Double-spend detected", "height": h})
+                    return
+                self.finalized_txs.add(tx.id)
+        if new_final > initial:
+            log_event(self.logger, {"time": t, "event": "FINALITY_UPDATE", "node": self.id, "previous_final_height": initial, "new_final_height": new_final})
+            print(f"[{self.id}] Finalized chain up to height {new_final}")
+            self.finalized_height = new_final

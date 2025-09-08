@@ -1,63 +1,64 @@
-# simulator/network.py
-
 import random
+from copy import deepcopy
+import heapq
 
 class Network:
-    """Simulates the network layer, including message delays."""
-    def __init__(self, latency_min, latency_max):
-        self.nodes = {}  
-        self.message_queue = []
-        self.latency_min = latency_min
-        self.latency_max = latency_max
-        self.is_partitioned = False
-        self.partition_groups = []
-
-    def partition(self, groups):
-        """Splits the network into isolated groups of node IDs."""
-        self.is_partitioned = True
-        # Using sets for efficient 'in' checks
-        self.partition_groups = [set(g) for g in groups]
-        print(" NETWORK PARTITIONED")
-
-    def heal(self):
-        """Rejoins the network into a single group."""
-        self.is_partitioned = False
-        self.partition_groups = []
-        print(" NETWORK HEALED")
+    def __init__(self, *args, **kwargs):
+        self.latency_min = kwargs.get("latency_min", kwargs.get("min_latency", 0))
+        self.latency_max = kwargs.get("latency_max", kwargs.get("max_latency", 0))
+        self.nodes = {}  # id -> Node
+        self.current_time = 0  # in ms
+        self.message_queue = []  
+        self._counter = 0
+        self.partition_groups = None  # None or list of sets
 
     def add_node(self, node):
         self.nodes[node.id] = node
 
-    def broadcast(self, sender_id, message):
-        if not self.is_partitioned:
-            for node_id, recipient_node in self.nodes.items():
-                if node_id != sender_id:
-                    delay = random.randint(self.latency_min, self.latency_max)
-                    self.message_queue.append((delay, recipient_node, message))
-        else:
-            sender_group = None
-            for group in self.partition_groups:
-                if sender_id in group:
-                    sender_group = group
-                    break
-            
-            if sender_group:
-                for node_id in sender_group:
-                    if node_id != sender_id:
-                        recipient_node = self.nodes[node_id]
-                        delay = random.randint(self.latency_min, self.latency_max)
-                        self.message_queue.append((delay, recipient_node, message))
-        
+    def _can_deliver(self, sender_id, recipient_id):
+        if self.partition_groups is None:
+            return True
+        for grp in self.partition_groups:
+            if sender_id in grp:
+                return recipient_id in grp
+        return True
 
-    def tick(self, time_step):
-        delivered_messages = []
-        remaining_messages = []
-        for (delay, recipient, message) in self.message_queue:
-            if delay <= time_step:
-                delivered_messages.append((recipient, message))
-            else:
-                remaining_messages.append((delay - time_step, recipient, message))
-        
-        self.message_queue = remaining_messages
-        
-        return delivered_messages
+    def broadcast(self, sender_id, message):
+        for nid in list(self.nodes.keys()):
+            if nid == sender_id:
+                continue
+            if not self._can_deliver(sender_id, nid):
+                continue
+            deliver_delay = random.randint(self.latency_min, self.latency_max)
+            deliver_time = self.current_time + deliver_delay
+            msg = {"type": message["type"], "time": message.get("time", self.current_time), "data": deepcopy(message["data"])}
+            heapq.heappush(self.message_queue, (deliver_time, self._counter, nid, sender_id, msg))
+            self._counter += 1
+
+    def send_direct(self, sender_id, recipient_id, message):
+        if recipient_id not in self.nodes:
+            return
+        if not self._can_deliver(sender_id, recipient_id):
+            return
+        deliver_delay = random.randint(self.latency_min, self.latency_max)
+        deliver_time = self.current_time + deliver_delay
+        msg = {"type": message["type"], "time": message.get("time", self.current_time), "data": deepcopy(message["data"])}
+        heapq.heappush(self.message_queue, (deliver_time, self._counter, recipient_id, sender_id, msg))
+        self._counter += 1
+
+    def tick(self, elapsed_ms):
+        self.current_time += elapsed_ms
+        delivered = []
+        while self.message_queue and self.message_queue[0][0] <= self.current_time:
+            deliver_time, _, recipient_id, sender_id, msg = heapq.heappop(self.message_queue)
+            node = self.nodes.get(recipient_id)
+            if not node:
+                continue
+            delivered.append((node, msg))
+        return delivered
+
+    def partition(self, groups):
+        self.partition_groups = [set(g) for g in groups]
+
+    def heal(self):
+        self.partition_groups = None
