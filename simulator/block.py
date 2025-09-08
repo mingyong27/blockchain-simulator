@@ -36,7 +36,6 @@ class Block:
         self.hash = self.calculate_hash()
 
     def calculate_hash(self):
-        # Deterministic representation: use transaction dicts sorted by id
         tx_list = [tx.to_dict() for tx in self.transactions]
         block_data = {
             "height": self.height,
@@ -54,7 +53,6 @@ class Block:
         self.hash = self.calculate_hash()
 
     def is_valid(self):
-        # Check that stored hash matches recalculated hash
         return self.hash == self.calculate_hash()
 
     def __repr__(self):
